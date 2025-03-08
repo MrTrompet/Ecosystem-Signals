@@ -25,7 +25,7 @@ TARGET_THREAD_ID = int(os.getenv("TARGET_THREAD_ID", 2740))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "TU_OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
 
-# Si tienes una API key de CoinGecko (plan Enterprise, por ejemplo)
+# Si tienes una API key para CoinGecko (plan Enterprise, por ejemplo)
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3"
 
@@ -37,13 +37,16 @@ COINS = {
 TIMEFRAME = os.getenv("TIMEFRAME", "4h")
 OHLC_DAYS = 14  # Para obtener velas de 4h se recomienda 14 días
 
-# Intervalo de escaneo (en segundos); aumenta para no exceder el límite de peticiones
+# Intervalo de escaneo en segundos (60 para respetar rate limit)
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 60))
 
 # Configuración para el modelo ML
 feature_columns = ["open", "high", "low", "close", "EMA_fast", "EMA_slow", "RSI", "BBU", "BBL"]
 MODEL = xgb.XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
 MODEL_FITTED = False
+
+# Variable global para controlar log de no detección (una vez por minuto)
+last_no_detection_log_time = 0
 
 # ─────────────────────────────────────────────
 # Funciones del Telegram Handler
@@ -99,6 +102,7 @@ def get_updates():
         return []
 
 def telegram_bot_loop():
+    # Se reduce la frecuencia a 60 segundos
     last_update_id = None
     while True:
         try:
@@ -108,7 +112,7 @@ def telegram_bot_loop():
                     update_id = update.get("update_id")
                     if last_update_id is None or update_id > last_update_id:
                         last_update_id = update_id
-            time.sleep(3)
+            time.sleep(60)
         except Exception as e:
             print(f"Error en el bucle del bot: {e}")
             time.sleep(10)
@@ -125,7 +129,6 @@ def get_ohlc(coin_id="bitcoin", vs_currency="usd", days=OHLC_DAYS):
     try:
         response = requests.get(url, params=params, headers=headers)
         data = response.json()
-        # Verificar si se recibió un error (por ejemplo, 429)
         if isinstance(data, dict) and "status" in data:
             print(f"Error al obtener OHLC: {data}")
             return pd.DataFrame()
@@ -307,6 +310,7 @@ def send_scan_graph(chat_id=TELEGRAM_CHAT_ID, timeframe="1h", cross_type="golden
 # Función principal de escaneo de mercados
 # ─────────────────────────────────────────────
 def scan_markets():
+    global last_no_detection_log_time
     for coin_id, symbol in COINS.items():
         try:
             df = get_ohlc(coin_id=coin_id, days=OHLC_DAYS)
@@ -342,15 +346,40 @@ def scan_markets():
                        f"{bb_msg}.\nRSI: {rsi_value:.2f}.\nSe recomienda discreción. ¡Suerte, agente!")
                 messages.append(msg)
             
-            for msg in messages:
-                print(f"{datetime.now()} - Enviando mensaje para {symbol}:")
-                print(msg)
-                send_telegram_message(msg)
-                analysis = analyze_signal_with_chatgpt(msg)
-                print(f"Análisis AI: {analysis}")
-                send_telegram_message(f"Análisis AI: {analysis}")
+            if messages:
+                for msg in messages:
+                    print(f"{datetime.now()} - Enviando mensaje para {symbol}:")
+                    print(msg)
+                    send_telegram_message(msg)
+                    analysis = analyze_signal_with_chatgpt(msg)
+                    print(f"Análisis AI: {analysis}")
+                    send_telegram_message(f"Análisis AI: {analysis}")
+            else:
+                # Solo loguear una vez por minuto si no se detecta nada
+                now = time.time()
+                if now - last_no_detection_log_time >= 60:
+                    print(f"{datetime.now()} - No se detectó ninguna señal en {symbol}.")
+                    last_no_detection_log_time = now
         except Exception as e:
             print(f"Error al procesar {coin_id}: {e}")
+
+def log_indicators_status():
+    """
+    Cada minuto, obtiene los datos OHLC, calcula indicadores y registra
+    en los logs el precio, SMA corta, SMA larga y RSI.
+    """
+    while True:
+        for coin_id, symbol in COINS.items():
+            df = get_ohlc(coin_id=coin_id, days=OHLC_DAYS)
+            if df.empty or len(df) < 2:
+                print(f"{datetime.now()} - [Status] No hay datos para {symbol}")
+            else:
+                df = calculate_indicators(df)
+                latest = df.iloc[-1]
+                log_msg = (f"{datetime.now()} - [Status] {symbol}: Precio: {latest['close']:.2f}, "
+                           f"SMA_corta: {latest['sma_short']:.2f}, SMA_larga: {latest['sma_long']:.2f}, RSI: {latest['RSI']:.2f}")
+                print(log_msg)
+        time.sleep(60)
 
 def background_scan():
     while True:
@@ -375,13 +404,21 @@ def scan_route():
 # Bloque principal
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
+    # Enviar mensaje inicial de activación
+    send_telegram_message("Ess Sacan Activated, Cyb3er Conexion established...")
+    # Entrenar el modelo ML con datos históricos
     historical_data = fetch_data_coingecko(coin_id="bitcoin", days=OHLC_DAYS)
     if not historical_data.empty:
         train_ml_model(historical_data)
     else:
         print("No se pudieron obtener datos históricos para entrenar el modelo ML.")
+    # Iniciar hilo para escaneo de mercado
     scan_thread = threading.Thread(target=background_scan, daemon=True)
     scan_thread.start()
+    # Iniciar hilo para registrar el estado de los indicadores cada minuto
+    status_thread = threading.Thread(target=log_indicators_status, daemon=True)
+    status_thread.start()
+    # Iniciar hilo del bot de Telegram (opcional; se usa polling cada 60 segundos)
     telegram_thread = threading.Thread(target=telegram_bot_loop, daemon=True)
     telegram_thread.start()
     port = int(os.environ.get("PORT", 5000))
