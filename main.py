@@ -34,6 +34,7 @@ COINS = {
 # Configuración para el modelo ML
 feature_columns = ["open", "high", "low", "close", "EMA_fast", "EMA_slow", "RSI", "BBU", "BBL"]
 MODEL = xgb.XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
+MODEL_FITTED = False  # Bandera para indicar si se entrenó el modelo
 
 # ─────────────────────────────────────────────
 # Funciones del Telegram Handler
@@ -103,7 +104,7 @@ def telegram_bot_loop():
                 for update in updates:
                     update_id = update.get("update_id")
                     if last_update_id is None or update_id > last_update_id:
-                        # Aquí se podrían procesar los mensajes de forma interactiva.
+                        # Procesa mensajes si es necesario.
                         last_update_id = update_id
             time.sleep(3)
         except Exception as e:
@@ -142,13 +143,17 @@ def fetch_data_coingecko(coin_id="bitcoin", vs_currency="usd", days=1):
     try:
         response = requests.get(url, params=params)
         data = response.json()
-        df = pd.DataFrame(data['prices'], columns=['timestamp', 'price'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df['open'] = df['price']
-        df['high'] = df['price']
-        df['low'] = df['price']
-        df['close'] = df['price']
-        df['volume'] = 1
+        if "prices" not in data:
+            print("Error al obtener datos de CoinGecko: 'prices' no encontrado en la respuesta.")
+            return pd.DataFrame()
+        df = pd.DataFrame(data["prices"], columns=["timestamp", "price"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        # Simular columnas OHLC (igual al precio)
+        df["open"] = df["price"]
+        df["high"] = df["price"]
+        df["low"] = df["price"]
+        df["close"] = df["price"]
+        df["volume"] = 1  # Valor dummy
         return df
     except Exception as e:
         print(f"Error al obtener datos de CoinGecko: {e}")
@@ -253,11 +258,16 @@ def train_ml_model(data):
     """
     Entrena el modelo ML con datos históricos.
     """
+    global MODEL_FITTED
     data = add_extra_features(data)
     features = data[feature_columns].pct_change().dropna()
-    target = (features['close'] > 0).astype(int)
+    if features.empty:
+        print("No hay datos suficientes para entrenar el modelo ML.")
+        return
+    target = (features["close"] > 0).astype(int)
     try:
         MODEL.fit(features, target)
+        MODEL_FITTED = True
     except Exception as e:
         print(f"Error al entrenar el modelo ML: {e}")
 
@@ -265,6 +275,9 @@ def predict_cross_strength(data):
     """
     Retorna la probabilidad de una señal fuerte usando el modelo ML.
     """
+    if not MODEL_FITTED:
+        print("Modelo ML no está entrenado. Se requiere llamar a train_ml_model antes.")
+        return None
     data = add_extra_features(data)
     features = data[feature_columns].pct_change().dropna().iloc[-1:][feature_columns]
     try:
@@ -282,41 +295,41 @@ def send_scan_graph(chat_id=TELEGRAM_CHAT_ID, timeframe="1h", cross_type="golden
     Genera un gráfico de velas (se usan datos simulados para este ejemplo)
     con SMA y líneas de soporte/resistencia, y lo envía a Telegram.
     """
-    dates = pd.date_range(end=pd.Timestamp.now(), periods=100, freq='H')
+    dates = pd.date_range(end=pd.Timestamp.now(), periods=100, freq="H")
     data = pd.DataFrame({
-        'open': np.random.uniform(300, 400, size=100),
-        'high': np.random.uniform(400, 500, size=100),
-        'low': np.random.uniform(200, 300, size=100),
-        'close': np.random.uniform(300, 400, size=100),
-        'volume': np.random.uniform(100, 1000, size=100)
+        "open": np.random.uniform(300, 400, size=100),
+        "high": np.random.uniform(400, 500, size=100),
+        "low": np.random.uniform(200, 300, size=100),
+        "close": np.random.uniform(300, 400, size=100),
+        "volume": np.random.uniform(100, 1000, size=100)
     }, index=dates)
     
-    sma_short = data['close'].rolling(window=10).mean()
-    sma_long = data['close'].rolling(window=25).mean()
-    support = data['close'].min()
-    resistance = data['close'].max()
+    sma_short = data["close"].rolling(window=10).mean()
+    sma_long = data["close"].rolling(window=25).mean()
+    support = data["close"].min()
+    resistance = data["close"].max()
     
     buf = io.BytesIO()
     caption = f"{COINS.get('bitcoin', 'BTCUSDT')} - {timeframe} - {cross_type.capitalize()} Cross"
     
-    mc = mpf.make_marketcolors(up='green', down='red', inherit=True)
-    style = mpf.make_mpf_style(marketcolors=mc, gridstyle="--", facecolor='black', edgecolor='white', gridcolor='white')
-    ap0 = mpf.make_addplot(sma_short, color='cyan')
-    ap1 = mpf.make_addplot(sma_long, color='magenta')
+    mc = mpf.make_marketcolors(up="green", down="red", inherit=True)
+    style = mpf.make_mpf_style(marketcolors=mc, gridstyle="--", facecolor="black", edgecolor="white", gridcolor="white")
+    ap0 = mpf.make_addplot(sma_short, color="cyan")
+    ap1 = mpf.make_addplot(sma_long, color="magenta")
     sr_support = [support] * len(data)
     sr_resistance = [resistance] * len(data)
-    ap2 = mpf.make_addplot(sr_support, color='green', linestyle='--', width=0.8)
-    ap3 = mpf.make_addplot(sr_resistance, color='red', linestyle='--', width=0.8)
+    ap2 = mpf.make_addplot(sr_support, color="green", linestyle="--", width=0.8)
+    ap3 = mpf.make_addplot(sr_resistance, color="red", linestyle="--", width=0.8)
     
-    fig, axlist = mpf.plot(data, type='candle', style=style, title=caption,
+    fig, axlist = mpf.plot(data, type="candle", style=style, title=caption,
                              volume=False, addplot=[ap0, ap1, ap2, ap3], returnfig=True)
-    fig.savefig(buf, dpi=100, format='png')
+    fig.savefig(buf, dpi=100, format="png")
     plt.close(fig)
     buf.seek(0)
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    files = {'photo': buf}
-    payload = {'chat_id': chat_id, 'caption': caption, 'message_thread_id': TARGET_THREAD_ID}
+    files = {"photo": buf}
+    payload = {"chat_id": chat_id, "caption": caption, "message_thread_id": TARGET_THREAD_ID}
     try:
         response = requests.post(url, data=payload, files=files)
         if response.status_code != 200:
@@ -353,7 +366,7 @@ def scan_markets():
             rsi_value = df["RSI"].iloc[-1]
             strength = predict_cross_strength(df)
             
-            # Condiciones para enviar señales (evitando repeticiones y considerando umbrales de RSI)
+            # Condiciones para enviar señales
             if golden and rsi_value < 40:
                 msg = (f"*ESS SCAN* [Thread {TARGET_THREAD_ID}]:\nAgente ha detectado un movimiento alcista en {symbol}.\n"
                        f"{golden_msg}.\nEMAs: {df['EMA_fast'].iloc[-1]:.2f} / {df['EMA_slow'].iloc[-1]:.2f}.\n"
@@ -408,10 +421,12 @@ def scan_route():
 # Bloque principal
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    # Entrenar el modelo ML con datos históricos (opcional)
+    # Entrenar el modelo ML con datos históricos (si se obtienen datos válidos)
     historical_data = fetch_data_coingecko(coin_id="bitcoin", days=1)
     if not historical_data.empty:
         train_ml_model(historical_data)
+    else:
+        print("No se pudieron obtener datos históricos para entrenar el modelo ML.")
     # Inicia el thread de escaneo de mercado
     scan_thread = threading.Thread(target=background_scan, daemon=True)
     scan_thread.start()
