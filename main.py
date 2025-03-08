@@ -19,10 +19,10 @@ from langdetect import detect
 # ─────────────────────────────────────────────
 # Configuración y variables de entorno
 # ─────────────────────────────────────────────
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "TU_TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "TU_CHAT_ID")
-TARGET_THREAD_ID = int(os.getenv("TARGET_THREAD_ID", 2740))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "TU_OPENAI_API_KEY")
+TARGET_THREAD_ID = int(os.getenv("TARGET_THREAD_ID", "2740"))
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "*******")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "*******")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "*******")
 openai.api_key = OPENAI_API_KEY
 
 # Si tienes una API key para CoinGecko (plan Enterprise, por ejemplo)
@@ -37,36 +37,36 @@ COINS = {
 TIMEFRAME = os.getenv("TIMEFRAME", "4h")
 OHLC_DAYS = 14  # Para obtener velas de 4h se recomienda 14 días
 
-# Intervalo de escaneo en segundos (60 para respetar rate limit)
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 60))
+# Intervalo de escaneo en segundos (60 para respetar el rate limit)
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "60"))
 
 # Configuración para el modelo ML
 feature_columns = ["open", "high", "low", "close", "EMA_fast", "EMA_slow", "RSI", "BBU", "BBL"]
 MODEL = xgb.XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
 MODEL_FITTED = False
 
-# Variable global para controlar log de no detección (una vez por minuto)
+# Variable global para controlar log de "no detección" (una vez por minuto)
 last_no_detection_log_time = 0
 
 # ─────────────────────────────────────────────
 # Funciones del Telegram Handler
 # ─────────────────────────────────────────────
 def send_telegram_message(message, chat_id=TELEGRAM_CHAT_ID, message_thread_id=TARGET_THREAD_ID):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": message,
         "parse_mode": "Markdown"
     }
-    # Si TARGET_THREAD_ID es un entero positivo, lo incluimos
     try:
-        thread_id = int(message_thread_id)
-    except Exception:
-        thread_id = None
-    if thread_id and thread_id > 0:
-        payload["message_thread_id"] = thread_id
-    print(f"[Debug] Enviando mensaje a chat {chat_id} en thread {thread_id}: {message}")
-    try:
+        # Incluir message_thread_id solo si es un entero positivo
+        try:
+            thread_id = int(message_thread_id)
+        except Exception:
+            thread_id = None
+        if thread_id and thread_id > 0:
+            payload["message_thread_id"] = thread_id
+        print(f"[Debug] Enviando mensaje a chat {chat_id} en thread {thread_id}: {message}")
         response = requests.post(url, json=payload)
         if response.status_code != 200:
             print(f"Error al enviar mensaje a Telegram: {response.text}")
@@ -94,7 +94,7 @@ def analyze_signal_with_chatgpt(message):
         return f"⚠️ Error en análisis AI: {e}"
 
 def get_updates():
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
     try:
         response = requests.get(url)
         if response.status_code == 200:
@@ -110,7 +110,6 @@ def get_updates():
         return []
 
 def telegram_bot_loop():
-    # Se reduce la frecuencia a 60 segundos
     last_update_id = None
     while True:
         try:
@@ -304,7 +303,7 @@ def send_scan_graph(chat_id=TELEGRAM_CHAT_ID, timeframe="1h", cross_type="golden
     plt.close(fig)
     buf.seek(0)
     
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     files = {"photo": buf}
     payload = {"chat_id": chat_id, "caption": caption, "message_thread_id": TARGET_THREAD_ID}
     try:
@@ -363,7 +362,6 @@ def scan_markets():
                     print(f"Análisis AI: {analysis}")
                     send_telegram_message(f"Análisis AI: {analysis}")
             else:
-                # Solo loguear una vez por minuto si no se detecta nada
                 now = time.time()
                 if now - last_no_detection_log_time >= 60:
                     print(f"{datetime.now()} - No se detectó ninguna señal en {symbol}.")
@@ -372,10 +370,6 @@ def scan_markets():
             print(f"Error al procesar {coin_id}: {e}")
 
 def log_indicators_status():
-    """
-    Cada minuto, obtiene los datos OHLC, calcula indicadores y registra
-    en los logs el precio, SMA corta, SMA larga y RSI.
-    """
     while True:
         for coin_id, symbol in COINS.items():
             df = get_ohlc(coin_id=coin_id, days=OHLC_DAYS)
@@ -426,8 +420,8 @@ if __name__ == "__main__":
     # Iniciar hilo para registrar el estado de los indicadores cada minuto
     status_thread = threading.Thread(target=log_indicators_status, daemon=True)
     status_thread.start()
-    # Iniciar hilo del bot de Telegram (opcional; se usa polling cada 60 segundos)
+    # Iniciar hilo del bot de Telegram (polling cada 60 segundos)
     telegram_thread = threading.Thread(target=telegram_bot_loop, daemon=True)
     telegram_thread.start()
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
