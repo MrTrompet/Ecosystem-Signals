@@ -9,3 +9,15 @@ langdetect
 pytz
 matplotlib
 mplfinance
+Flask
+pandas
+numpy
+ta
+xgboost
+requests
+openai
+langdetect
+pytz
+matplotlib
+mplfinance
+scikit-learn
