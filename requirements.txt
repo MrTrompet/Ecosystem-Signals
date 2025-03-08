@@ -3,3 +3,10 @@ pandas==2.2.3
 requests==2.26.0
 werkzeug==2.0.3
 setuptools==65.5.0
+numpy==1.23.5
+matplotlib==3.6.3
+mplfinance==0.12.9
+openai==0.27.8
+xgboost==1.7.5
+ta==0.10.2
+langdetect==1.0.9
