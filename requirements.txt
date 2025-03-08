@@ -10,3 +10,4 @@ openai==0.27.8
 xgboost==1.7.5
 ta==0.10.2
 langdetect==1.0.9
+py3-distutils==3.12.0
