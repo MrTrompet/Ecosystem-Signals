@@ -25,7 +25,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "*******")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "*******")
 openai.api_key = OPENAI_API_KEY
 
-# Si tienes una API key para CoinGecko (plan Enterprise, por ejemplo)
+# Si tienes una API key para CoinGecko (plan Enterprise)
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3"
 
@@ -37,16 +37,23 @@ COINS = {
 TIMEFRAME = os.getenv("TIMEFRAME", "4h")
 OHLC_DAYS = 14  # Para obtener velas de 4h se recomienda 14 días
 
-# Intervalo de escaneo en segundos (60 para respetar el rate limit)
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "60"))
+# Intervalo de escaneo y log (en segundos): 300 = 5 minutos
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
 
 # Configuración para el modelo ML
 feature_columns = ["open", "high", "low", "close", "EMA_fast", "EMA_slow", "RSI", "BBU", "BBL"]
 MODEL = xgb.XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
 MODEL_FITTED = False
+_model_error_logged = False  # Para loguear error de modelo solo una vez
 
-# Variable global para controlar log de "no detección" (una vez por minuto)
+# Variable global para controlar el log de "no detección" (una vez por 5 minutos)
 last_no_detection_log_time = 0
+
+# Variable global para asegurar que el mensaje inicial se envíe solo una vez
+initial_message_sent = False
+
+# Caching de datos OHLC (por moneda)
+cached_ohlc = {}
 
 # ─────────────────────────────────────────────
 # Funciones del Telegram Handler
@@ -77,7 +84,7 @@ def send_telegram_message(message, chat_id=TELEGRAM_CHAT_ID, message_thread_id=T
 def analyze_signal_with_chatgpt(message):
     system_prompt = (
         "Eres Higgs X, el agente de inteligencia encargado de vigilar el ecosistema. "
-        "Responde de forma concisa y con un toque misterioso."
+        "Responde de forma concisa y con un toque enigmático y hacker."
     )
     try:
         response = openai.ChatCompletion.create(
@@ -119,13 +126,13 @@ def telegram_bot_loop():
                     update_id = update.get("update_id")
                     if last_update_id is None or update_id > last_update_id:
                         last_update_id = update_id
-            time.sleep(60)
+            time.sleep(300)
         except Exception as e:
             print(f"Error en el bucle del bot: {e}")
             time.sleep(10)
 
 # ─────────────────────────────────────────────
-# Funciones para obtener datos de mercado
+# Funciones para obtener datos de mercado con caching
 # ─────────────────────────────────────────────
 def get_ohlc(coin_id="bitcoin", vs_currency="usd", days=OHLC_DAYS):
     url = f"{COINGECKO_API_URL}/coins/{coin_id}/ohlc"
@@ -138,6 +145,10 @@ def get_ohlc(coin_id="bitcoin", vs_currency="usd", days=OHLC_DAYS):
         data = response.json()
         if isinstance(data, dict) and "status" in data:
             print(f"Error al obtener OHLC: {data}")
+            # Si existe data en caché, la retornamos
+            if coin_id in cached_ohlc:
+                print(f"[Cache] Usando datos OHLC cacheados para {coin_id}")
+                return cached_ohlc[coin_id]
             return pd.DataFrame()
         if not isinstance(data, list):
             print("Error en la estructura de la respuesta OHLC:", data)
@@ -146,6 +157,7 @@ def get_ohlc(coin_id="bitcoin", vs_currency="usd", days=OHLC_DAYS):
         df["time"] = pd.to_datetime(df["time"], unit="ms")
         for col in ["open", "high", "low", "close"]:
             df[col] = pd.to_numeric(df[col])
+        cached_ohlc[coin_id] = df  # Actualizamos la caché
         return df
     except Exception as e:
         print(f"Error al obtener OHLC para {coin_id}: {e}")
@@ -255,8 +267,11 @@ def train_ml_model(data):
         print(f"Error al entrenar el modelo ML: {e}")
 
 def predict_cross_strength(data):
+    global _model_error_logged
     if not MODEL_FITTED:
-        print("Modelo ML no está entrenado. Se requiere llamar a train_ml_model antes.")
+        if not _model_error_logged:
+            print("Modelo ML no está entrenado. Se requiere llamar a train_ml_model antes.")
+            _model_error_logged = True
         return None
     data = add_extra_features(data)
     features = data[feature_columns].pct_change().dropna().iloc[-1:][feature_columns]
@@ -338,14 +353,14 @@ def scan_markets():
                 msg = (f"*ESS SCAN* [Thread {TARGET_THREAD_ID}]:\nAgente ha detectado un movimiento alcista en {symbol}.\n"
                        f"{golden_msg}.\nEMAs: {df['EMA_fast'].iloc[-1]:.2f} / {df['EMA_slow'].iloc[-1]:.2f}.\n"
                        f"RSI: {rsi_value:.2f} | Fuerza de señal (ML): {strength if strength is not None else 'N/A'}.\n"
-                       "Se recomienda discreción en la toma de decisiones. ¡Suerte, agente!")
+                       "Se recomienda discreción. ¡Suerte, agente!")
                 messages.append(msg)
                 send_scan_graph(cross_type="golden")
             if death and rsi_value > 60:
                 msg = (f"*ESS SCAN* [Thread {TARGET_THREAD_ID}]:\nAgente ha detectado un movimiento bajista en {symbol}.\n"
                        f"{death_msg}.\nEMAs: {df['EMA_fast'].iloc[-1]:.2f} / {df['EMA_slow'].iloc[-1]:.2f}.\n"
                        f"RSI: {rsi_value:.2f} | Fuerza de señal (ML): {strength if strength is not None else 'N/A'}.\n"
-                       "Se recomienda discreción en la toma de decisiones. ¡Suerte, agente!")
+                       "Se recomienda discreción. ¡Suerte, agente!")
                 messages.append(msg)
                 send_scan_graph(cross_type="death")
             if bb_signal:
@@ -363,7 +378,7 @@ def scan_markets():
                     send_telegram_message(f"Análisis AI: {analysis}")
             else:
                 now = time.time()
-                if now - last_no_detection_log_time >= 60:
+                if now - last_no_detection_log_time >= 300:
                     print(f"{datetime.now()} - No se detectó ninguna señal en {symbol}.")
                     last_no_detection_log_time = now
         except Exception as e:
@@ -381,7 +396,7 @@ def log_indicators_status():
                 log_msg = (f"{datetime.now()} - [Status] {symbol}: Precio: {latest['close']:.2f}, "
                            f"SMA_corta: {latest['sma_short']:.2f}, SMA_larga: {latest['sma_long']:.2f}, RSI: {latest['RSI']:.2f}")
                 print(log_msg)
-        time.sleep(60)
+        time.sleep(300)
 
 def background_scan():
     while True:
@@ -406,21 +421,22 @@ def scan_route():
 # Bloque principal
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    # Enviar mensaje inicial de activación
-    send_telegram_message("Ess Sacan Activated, Cyb3er Conexion established...")
-    # Entrenar el modelo ML con datos históricos
+    # Enviar mensaje inicial de activación (solo una vez)
+    if not initial_message_sent:
+        welcome_msg = "Ess Sacan Activated. Cyb3er Conexion established... [H4X0R MODE]"
+        send_telegram_message(welcome_msg)
+        initial_message_sent = True
+    # Intentar entrenar el modelo ML con datos históricos
     historical_data = fetch_data_coingecko(coin_id="bitcoin", days=OHLC_DAYS)
     if not historical_data.empty:
         train_ml_model(historical_data)
     else:
         print("No se pudieron obtener datos históricos para entrenar el modelo ML.")
-    # Iniciar hilo para escaneo de mercado
+    # Iniciar hilos:
     scan_thread = threading.Thread(target=background_scan, daemon=True)
     scan_thread.start()
-    # Iniciar hilo para registrar el estado de los indicadores cada minuto
     status_thread = threading.Thread(target=log_indicators_status, daemon=True)
     status_thread.start()
-    # Iniciar hilo del bot de Telegram (polling cada 60 segundos)
     telegram_thread = threading.Thread(target=telegram_bot_loop, daemon=True)
     telegram_thread.start()
     port = int(os.environ.get("PORT", "5000"))
