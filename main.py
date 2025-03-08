@@ -19,7 +19,7 @@ from langdetect import detect
 # ─────────────────────────────────────────────
 # Configuración y variables de entorno
 # ─────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "TU_TELEGRAM_BOT_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "TU_TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "TU_CHAT_ID")
 TARGET_THREAD_ID = int(os.getenv("TARGET_THREAD_ID", 2740))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "TU_OPENAI_API_KEY")
@@ -56,13 +56,21 @@ def send_telegram_message(message, chat_id=TELEGRAM_CHAT_ID, message_thread_id=T
     payload = {
         "chat_id": chat_id,
         "text": message,
-        "parse_mode": "Markdown",
-        "message_thread_id": message_thread_id
+        "parse_mode": "Markdown"
     }
+    # Si TARGET_THREAD_ID es un entero positivo, lo incluimos
+    try:
+        thread_id = int(message_thread_id)
+    except Exception:
+        thread_id = None
+    if thread_id and thread_id > 0:
+        payload["message_thread_id"] = thread_id
+    print(f"[Debug] Enviando mensaje a chat {chat_id} en thread {thread_id}: {message}")
     try:
         response = requests.post(url, json=payload)
         if response.status_code != 200:
             print(f"Error al enviar mensaje a Telegram: {response.text}")
+        return response.json()
     except Exception as e:
         print(f"Error en la conexión con Telegram: {e}")
 
