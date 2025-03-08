@@ -4,7 +4,6 @@ import threading
 import requests
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
 from flask import Flask
 from datetime import datetime
 
@@ -43,18 +42,24 @@ def get_ohlc(coin_id="bitcoin", vs_currency="usd", days=14):
 
 def calculate_indicators(df):
     """
-    Calcula los indicadores técnicos: EMAs, RSI y Bandas de Bollinger.
+    Calcula los indicadores técnicos: EMAs, RSI y Bandas de Bollinger utilizando solo pandas y numpy.
     """
     # EMAs: ejemplo de 12 y 26 periodos
     df["EMA_fast"] = df["close"].ewm(span=12, adjust=False).mean()
     df["EMA_slow"] = df["close"].ewm(span=26, adjust=False).mean()
 
     # RSI (14 periodos)
-    df["RSI"] = ta.rsi(df["close"], length=14)
+    delta = df["close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df["RSI"] = 100 - (100 / (1 + rs))
 
     # Bandas de Bollinger (20 periodos, desviación 2)
-    bb = ta.bbands(df["close"], length=20, std=2)
-    df = pd.concat([df, bb], axis=1)
+    rolling_mean = df["close"].rolling(window=20).mean()
+    rolling_std = df["close"].rolling(window=20).std()
+    df["BBU"] = rolling_mean + (rolling_std * 2)
+    df["BBL"] = rolling_mean - (rolling_std * 2)
 
     return df
 
@@ -83,10 +88,10 @@ def check_bollinger_signals(df):
     latest = df.iloc[-1]
     signal = ""
     # Si el cierre previo estaba por debajo de la banda superior y el cierre actual la supera:
-    if df["close"].iloc[-2] < df["BBU_20_2.0"].iloc[-2] and latest["close"] > latest["BBU_20_2.0"]:
+    if df["close"].iloc[-2] < df["BBU"].iloc[-2] and latest["close"] > latest["BBU"]:
         signal = "Precio cruza hacia arriba la Banda Superior de Bollinger"
     # Comprobamos si las bandas se están acercando (por ejemplo, diferencia menor al 1% del precio)
-    band_width = latest["BBU_20_2.0"] - latest["BBL_20_2.0"]
+    band_width = latest["BBU"] - latest["BBL"]
     if band_width < (latest["close"] * 0.01):
         if signal:
             signal += " | "
