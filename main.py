@@ -85,8 +85,11 @@ def get_updates():
     try:
         response = requests.get(url)
         if response.status_code == 200:
-            updates = response.json().get("result", [])
-            return updates
+            return response.json().get("result", [])
+        elif response.status_code == 404:
+            # Si se utiliza webhook, getUpdates puede devolver 404, lo cual no es crítico.
+            print(f"getUpdates devolvió 404 (posiblemente por uso de webhook): {response.text}")
+            return []
         else:
             print(f"Error al obtener actualizaciones: {response.text}")
             return []
@@ -145,6 +148,7 @@ def fetch_data_coingecko(coin_id="bitcoin", vs_currency="usd", days=1):
         data = response.json()
         if "prices" not in data:
             print("Error al obtener datos de CoinGecko: 'prices' no encontrado en la respuesta.")
+            print("Respuesta completa:", data)
             return pd.DataFrame()
         df = pd.DataFrame(data["prices"], columns=["timestamp", "price"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
