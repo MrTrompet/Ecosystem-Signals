@@ -25,16 +25,23 @@ TARGET_THREAD_ID = int(os.getenv("TARGET_THREAD_ID", 2740))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "TU_OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
 
+# Variable para la API de CoinGecko (si tienes API key para el plan Enterprise o similar)
+API_KEY = os.getenv("COINGECKO_API_KEY")
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3"
+
+# Definición de la moneda y símbolo; puedes agregar más en este diccionario
 COINS = {
     "bitcoin": "BTCUSDT"
-    # Puedes agregar más monedas aquí
 }
+
+# Definir el timeframe de estudio; para 4h recomendamos usar 14 días en las peticiones OHLC
+TIMEFRAME = os.getenv("TIMEFRAME", "4h")
+OHLC_DAYS = 14  # Para el endpoint /ohlc de CoinGecko, 14 días devuelve velas de 4h
 
 # Configuración para el modelo ML
 feature_columns = ["open", "high", "low", "close", "EMA_fast", "EMA_slow", "RSI", "BBU", "BBL"]
 MODEL = xgb.XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
-MODEL_FITTED = False  # Bandera para indicar si se entrenó el modelo
+MODEL_FITTED = False  # Bandera para indicar si el modelo fue entrenado
 
 # ─────────────────────────────────────────────
 # Funciones del Telegram Handler
@@ -87,7 +94,7 @@ def get_updates():
         if response.status_code == 200:
             return response.json().get("result", [])
         elif response.status_code == 404:
-            # Si se utiliza webhook, getUpdates puede devolver 404, lo cual no es crítico.
+            # Si se utiliza webhook, getUpdates puede devolver 404
             print(f"getUpdates devolvió 404 (posiblemente por uso de webhook): {response.text}")
             return []
         else:
@@ -107,7 +114,7 @@ def telegram_bot_loop():
                 for update in updates:
                     update_id = update.get("update_id")
                     if last_update_id is None or update_id > last_update_id:
-                        # Procesa mensajes si es necesario.
+                        # Aquí se podrían procesar los mensajes si se requiere interacción.
                         last_update_id = update_id
             time.sleep(3)
         except Exception as e:
@@ -117,16 +124,24 @@ def telegram_bot_loop():
 # ─────────────────────────────────────────────
 # Funciones para obtener datos de mercado
 # ─────────────────────────────────────────────
-def get_ohlc(coin_id="bitcoin", vs_currency="usd", days=14):
+def get_ohlc(coin_id="bitcoin", vs_currency="usd", days=OHLC_DAYS):
     """
     Obtiene datos OHLC de CoinGecko mediante la ruta /ohlc.
     Retorna un DataFrame con columnas: time, open, high, low, close.
+    Para obtener datos en velas de 4h se recomienda usar days=14.
     """
     url = f"{COINGECKO_API_URL}/coins/{coin_id}/ohlc"
     params = {"vs_currency": vs_currency, "days": days}
+    # Si tienes API key para CoinGecko, la incluimos en headers
+    headers = {}
+    if API_KEY:
+        headers["x-cg-pro-api-key"] = API_KEY
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, headers=headers)
         data = response.json()
+        if not isinstance(data, list):
+            print("Error al obtener OHLC:", data)
+            return pd.DataFrame()
         df = pd.DataFrame(data, columns=["time", "open", "high", "low", "close"])
         df["time"] = pd.to_datetime(df["time"], unit="ms")
         for col in ["open", "high", "low", "close"]:
@@ -136,15 +151,18 @@ def get_ohlc(coin_id="bitcoin", vs_currency="usd", days=14):
         print(f"Error al obtener OHLC para {coin_id}: {e}")
         return pd.DataFrame()
 
-def fetch_data_coingecko(coin_id="bitcoin", vs_currency="usd", days=1):
+def fetch_data_coingecko(coin_id="bitcoin", vs_currency="usd", days=OHLC_DAYS):
     """
     Obtiene datos históricos de CoinGecko (ruta market_chart) y simula columnas OHLC.
-    Útil para entrenar el modelo ML.
+    Se usa days=14 para obtener más datos (y evitar usar el parámetro 'interval').
     """
     url = f"{COINGECKO_API_URL}/coins/{coin_id}/market_chart"
-    params = {"vs_currency": vs_currency, "days": days, "interval": "hourly"}
+    params = {"vs_currency": vs_currency, "days": days}  # No se incluye 'interval'
+    headers = {}
+    if API_KEY:
+        headers["x-cg-pro-api-key"] = API_KEY
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, headers=headers)
         data = response.json()
         if "prices" not in data:
             print("Error al obtener datos de CoinGecko: 'prices' no encontrado en la respuesta.")
@@ -152,7 +170,7 @@ def fetch_data_coingecko(coin_id="bitcoin", vs_currency="usd", days=1):
             return pd.DataFrame()
         df = pd.DataFrame(data["prices"], columns=["timestamp", "price"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        # Simular columnas OHLC (igual al precio)
+        # Simular columnas OHLC (todos iguales al precio)
         df["open"] = df["price"]
         df["high"] = df["price"]
         df["low"] = df["price"]
@@ -172,32 +190,31 @@ def calculate_indicators(df):
       - EMAs (rápida y lenta)
       - RSI
       - Bandas de Bollinger
-      - SMA corta y larga (opcional para análisis adicional)
+      - SMA corta y larga (para análisis complementario)
     """
     df = df.copy()
-    # EMAs
+    # Calcular EMAs
     df["EMA_fast"] = df["close"].ewm(span=12, adjust=False).mean()
     df["EMA_slow"] = df["close"].ewm(span=26, adjust=False).mean()
-    # RSI
+    # Calcular RSI
     delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
-    # Bandas de Bollinger
+    # Calcular Bandas de Bollinger
     rolling_mean = df["close"].rolling(window=20).mean()
     rolling_std = df["close"].rolling(window=20).std()
     df["BBU"] = rolling_mean + (rolling_std * 2)
     df["BBL"] = rolling_mean - (rolling_std * 2)
-    # SMA para análisis complementario
+    # Calcular SMA (corta y larga) para análisis complementario
     df["sma_short"] = SMAIndicator(df["close"], window=10).sma_indicator()
     df["sma_long"] = SMAIndicator(df["close"], window=25).sma_indicator()
     return df
 
 def check_golden_cross(df):
     """
-    Detecta Golden Cross usando las EMAs:
-      - Se requiere que la EMA rápida cruce de abajo hacia arriba la EMA lenta.
+    Detecta Golden Cross: la EMA rápida cruza de abajo hacia arriba la EMA lenta.
     """
     if len(df) < 2:
         return False, ""
@@ -207,8 +224,7 @@ def check_golden_cross(df):
 
 def check_death_cross(df):
     """
-    Detecta Death Cross usando las EMAs:
-      - Se requiere que la EMA rápida cruce de arriba hacia abajo la EMA lenta.
+    Detecta Death Cross: la EMA rápida cruza de arriba hacia abajo la EMA lenta.
     """
     if len(df) < 2:
         return False, ""
@@ -218,9 +234,9 @@ def check_death_cross(df):
 
 def check_bollinger_signals(df):
     """
-    Detecta señales en las Bandas de Bollinger:
+    Detecta señales basadas en Bandas de Bollinger:
       - Cruce del precio sobre la banda superior.
-      - Convergencia de las bandas (reducción de volatilidad).
+      - Convergencia de bandas (reducción de volatilidad).
     """
     if len(df) < 2:
         return False, ""
@@ -230,12 +246,8 @@ def check_bollinger_signals(df):
         signal = "Precio cruza hacia arriba la Banda Superior de Bollinger"
     band_width = latest["BBU"] - latest["BBL"]
     if band_width < (latest["close"] * 0.01):
-        if signal:
-            signal += " | "
-        signal += "Convergencia de Bandas (baja volatilidad)"
-    if signal:
-        return True, signal
-    return False, ""
+        signal += " | Convergencia de Bandas (baja volatilidad)"
+    return (True, signal) if signal else (False, "")
 
 # ─────────────────────────────────────────────
 # Funciones para el Modelo ML (XGBoost)
@@ -248,7 +260,7 @@ def add_extra_features(data):
     data["EMA_fast"] = data["close"].ewm(span=12, adjust=False).mean()
     data["EMA_slow"] = data["close"].ewm(span=26, adjust=False).mean()
     delta = data["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     data["RSI"] = 100 - (100 / (1 + rs))
@@ -260,7 +272,7 @@ def add_extra_features(data):
 
 def train_ml_model(data):
     """
-    Entrena el modelo ML con datos históricos.
+    Entrena el modelo ML con datos históricos y actualiza la bandera MODEL_FITTED.
     """
     global MODEL_FITTED
     data = add_extra_features(data)
@@ -286,7 +298,7 @@ def predict_cross_strength(data):
     features = data[feature_columns].pct_change().dropna().iloc[-1:][feature_columns]
     try:
         prob = MODEL.predict_proba(features)[0]
-        return prob[1]  # probabilidad de señal fuerte
+        return prob[1]  # Probabilidad de señal fuerte
     except Exception as e:
         print(f"Error en la predicción ML: {e}")
         return None
@@ -296,8 +308,8 @@ def predict_cross_strength(data):
 # ─────────────────────────────────────────────
 def send_scan_graph(chat_id=TELEGRAM_CHAT_ID, timeframe="1h", cross_type="golden"):
     """
-    Genera un gráfico de velas (se usan datos simulados para este ejemplo)
-    con SMA y líneas de soporte/resistencia, y lo envía a Telegram.
+    Genera un gráfico de velas (con datos simulados para ejemplo) con SMA y líneas de soporte/resistencia,
+    y lo envía a Telegram.
     """
     dates = pd.date_range(end=pd.Timestamp.now(), periods=100, freq="H")
     data = pd.DataFrame({
@@ -325,8 +337,8 @@ def send_scan_graph(chat_id=TELEGRAM_CHAT_ID, timeframe="1h", cross_type="golden
     ap2 = mpf.make_addplot(sr_support, color="green", linestyle="--", width=0.8)
     ap3 = mpf.make_addplot(sr_resistance, color="red", linestyle="--", width=0.8)
     
-    fig, axlist = mpf.plot(data, type="candle", style=style, title=caption,
-                             volume=False, addplot=[ap0, ap1, ap2, ap3], returnfig=True)
+    fig, _ = mpf.plot(data, type="candle", style=style, title=caption,
+                      volume=False, addplot=[ap0, ap1, ap2, ap3], returnfig=True)
     fig.savefig(buf, dpi=100, format="png")
     plt.close(fig)
     buf.seek(0)
@@ -346,31 +358,27 @@ def send_scan_graph(chat_id=TELEGRAM_CHAT_ID, timeframe="1h", cross_type="golden
 # ─────────────────────────────────────────────
 def scan_markets():
     """
-    Analiza el mercado para cada moneda definida y envía señales solo cuando se detecta:
-      - Golden Cross (alcista) con confirmación RSI (valor bajo) y fortaleza ML
-      - Death Cross (bajista) con confirmación RSI (valor alto) y fortaleza ML
-      - Señales de Bandas de Bollinger
+    Analiza el mercado para cada moneda definida y envía señales sólo cuando se detecta:
+      - Golden Cross (alcista) con confirmación RSI (valor bajo) y fortaleza ML.
+      - Death Cross (bajista) con confirmación RSI (valor alto) y fortaleza ML.
+      - Señales de Bandas de Bollinger.
     """
     for coin_id, symbol in COINS.items():
         try:
-            df = get_ohlc(coin_id=coin_id)
+            df = get_ohlc(coin_id=coin_id, days=OHLC_DAYS)
             if df.empty or len(df) < 2:
                 print(f"{datetime.now()} - No hay suficientes datos para analizar {symbol}")
                 continue
             df = calculate_indicators(df)
             messages = []
             
-            # Detección de cruces usando EMAs
             golden, golden_msg = check_golden_cross(df)
             death, death_msg = check_death_cross(df)
-            # Señales con Bandas de Bollinger
             bb_signal, bb_msg = check_bollinger_signals(df)
             
-            # Validación adicional con RSI y modelo ML
             rsi_value = df["RSI"].iloc[-1]
             strength = predict_cross_strength(df)
             
-            # Condiciones para enviar señales
             if golden and rsi_value < 40:
                 msg = (f"*ESS SCAN* [Thread {TARGET_THREAD_ID}]:\nAgente ha detectado un movimiento alcista en {symbol}.\n"
                        f"{golden_msg}.\nEMAs: {df['EMA_fast'].iloc[-1]:.2f} / {df['EMA_slow'].iloc[-1]:.2f}.\n"
@@ -390,7 +398,6 @@ def scan_markets():
                        f"{bb_msg}.\nRSI: {rsi_value:.2f}.\nSe recomienda discreción. ¡Suerte, agente!")
                 messages.append(msg)
             
-            # Envío de mensajes y análisis con ChatGPT
             for msg in messages:
                 print(f"{datetime.now()} - Enviando mensaje para {symbol}:")
                 print(msg)
@@ -402,7 +409,7 @@ def scan_markets():
             print(f"Error al procesar {coin_id}: {e}")
 
 def background_scan():
-    """Bucle en segundo plano para el escaneo del mercado cada 5 segundos."""
+    """Bucle en segundo plano para escanear el mercado cada 5 segundos."""
     while True:
         scan_markets()
         time.sleep(5)
@@ -425,18 +432,18 @@ def scan_route():
 # Bloque principal
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    # Entrenar el modelo ML con datos históricos (si se obtienen datos válidos)
-    historical_data = fetch_data_coingecko(coin_id="bitcoin", days=1)
+    # Entrenar el modelo ML con datos históricos (usando datos de 14 días para 4h)
+    historical_data = fetch_data_coingecko(coin_id="bitcoin", days=OHLC_DAYS)
     if not historical_data.empty:
         train_ml_model(historical_data)
     else:
         print("No se pudieron obtener datos históricos para entrenar el modelo ML.")
-    # Inicia el thread de escaneo de mercado
+    # Iniciar hilo para escaneo de mercado
     scan_thread = threading.Thread(target=background_scan, daemon=True)
     scan_thread.start()
-    # Inicia el thread del bot de Telegram para procesar actualizaciones (opcional)
+    # Iniciar hilo del bot de Telegram (si se desea interacción)
     telegram_thread = threading.Thread(target=telegram_bot_loop, daemon=True)
     telegram_thread.start()
-    # Inicia la aplicación Flask
+    # Iniciar la aplicación Flask
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
